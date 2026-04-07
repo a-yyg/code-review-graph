@@ -62,8 +62,10 @@ diagrams/*.excalidraw
 diagrams/export_pngs.mjs
 *.excalidraw
 
-# Evaluation test repos (third-party checkouts)
+# Evaluation (test repos + generated results/reports)
 evaluate/test_repos/
+evaluate/results/
+evaluate/reports/
 
 # Draft/duplicate files
 docs/assets/marketing-diagram*
