@@ -538,6 +538,48 @@ class TestOpenAIEmbeddingProvider:
         assert len(out) == 250
         assert call_count["n"] == 3  # 100 + 100 + 50
 
+    def test_custom_batch_size_respected(self):
+        """new-api gateways (e.g. text-embedding-v4) cap batch at 10 —
+        user must be able to lower the batch size to avoid 400 errors."""
+        p = OpenAIEmbeddingProvider(
+            api_key="k", base_url="http://localhost:3000/v1", model="m",
+            batch_size=10,
+        )
+        texts = [f"t-{i}" for i in range(25)]
+        call_count = {"n": 0}
+
+        def _mk_response(*_args, **_kwargs):
+            call_count["n"] += 1
+            req = _args[0]
+            body = json.loads(req.data.decode("utf-8"))
+            assert len(body["input"]) <= 10  # never exceed configured size
+            return _make_openai_response([[0.1] * 5 for _ in body["input"]])
+
+        with patch("urllib.request.urlopen", side_effect=_mk_response):
+            out = p.embed(texts)
+        assert len(out) == 25
+        assert call_count["n"] == 3  # 10 + 10 + 5
+
+    def test_http_error_body_is_surfaced(self):
+        """If the gateway returns 400 with a JSON error body, the RuntimeError
+        must include the real reason, not just 'HTTP Error 400: Bad Request'."""
+        import urllib.error
+        p = OpenAIEmbeddingProvider(
+            api_key="k", base_url="http://localhost:3000/v1", model="m",
+        )
+        body = json.dumps({
+            "error": {"message": "batch size is invalid, should not exceed 10."},
+        }).encode("utf-8")
+        # HTTPError's .read() returns bytes from its fp
+        import io
+        err = urllib.error.HTTPError(
+            url="http://localhost:3000/v1/embeddings",
+            code=400, msg="Bad Request", hdrs=None, fp=io.BytesIO(body),
+        )
+        with patch("urllib.request.urlopen", side_effect=err):
+            with pytest.raises(RuntimeError, match="batch size is invalid"):
+                p.embed_query("x")
+
 
 class TestGetProviderOpenAI:
     _MIN_ENV = {

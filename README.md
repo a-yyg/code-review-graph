@@ -361,6 +361,8 @@ export CRG_OPENAI_API_KEY=sk-...
 export CRG_OPENAI_MODEL=text-embedding-3-small          # whatever your gateway serves
 # optional:
 export CRG_OPENAI_DIMENSION=1536                        # pin dim (v3 models support reduction)
+export CRG_OPENAI_BATCH_SIZE=100                        # lower for gateways with tight limits
+                                                        # (e.g. Qwen text-embedding-v4 caps at 10)
 ```
 
 The cloud-egress warning is auto-skipped when the base URL points to localhost

@@ -263,6 +263,8 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
     embedding store to re-embed (provider-aware isolation in the embeddings table).
     """
 
+    _DEFAULT_BATCH_SIZE = 100
+
     def __init__(
         self,
         api_key: str,
@@ -270,15 +272,18 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
         model: str,
         dimension: int | None = None,
         timeout: int = 120,
+        batch_size: int | None = None,
     ) -> None:
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._dimension = dimension
         self._timeout = timeout
+        self._batch_size = batch_size or self._DEFAULT_BATCH_SIZE
 
     def _call_api(self, texts: list[str]) -> list[list[float]]:
         import json as _json
+        import urllib.error
         import urllib.request
 
         body: dict[str, Any] = {"model": self._model, "input": texts}
@@ -302,10 +307,36 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
             try:
                 import ssl
                 _ssl_ctx = ssl.create_default_context()
-                with urllib.request.urlopen(  # nosec B310
-                    req, timeout=self._timeout, context=_ssl_ctx,
-                ) as resp:
-                    raw = resp.read().decode("utf-8")
+                try:
+                    with urllib.request.urlopen(  # nosec B310
+                        req, timeout=self._timeout, context=_ssl_ctx,
+                    ) as resp:
+                        raw = resp.read().decode("utf-8")
+                except urllib.error.HTTPError as http_err:
+                    # Surface the API error body instead of a bare "400 Bad Request" —
+                    # gateways like new-api return JSON with the real reason (batch
+                    # size limits, invalid model, etc.) which is far more actionable.
+                    try:
+                        err_body = http_err.read().decode("utf-8", errors="replace")
+                    except Exception:
+                        err_body = ""
+                    err_msg = err_body or str(http_err)
+                    try:
+                        parsed = _json.loads(err_body)
+                        if isinstance(parsed, dict) and "error" in parsed:
+                            err_obj = parsed["error"]
+                            err_msg = (
+                                err_obj.get("message", err_msg)
+                                if isinstance(err_obj, dict) else str(err_obj)
+                            )
+                    except Exception:  # nosec B110
+                        # Non-JSON error body is fine: we already seeded
+                        # err_msg with the raw body above, so fall through.
+                        pass
+                    raise RuntimeError(
+                        f"OpenAI API HTTP {http_err.code}: {err_msg}"
+                    ) from http_err
+
                 response = _json.loads(raw)
 
                 if "error" in response:
@@ -337,10 +368,9 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
         return []  # unreachable
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        batch_size = 100
         results: list[list[float]] = []
-        for i in range(0, len(texts), batch_size):
-            results.extend(self._call_api(texts[i:i + batch_size]))
+        for i in range(0, len(texts), self._batch_size):
+            results.extend(self._call_api(texts[i:i + self._batch_size]))
         return results
 
     def embed_query(self, text: str) -> list[float]:
@@ -441,6 +471,8 @@ def get_provider(
             )
         dim_env = os.environ.get("CRG_OPENAI_DIMENSION")
         dimension = int(dim_env) if dim_env else None
+        batch_env = os.environ.get("CRG_OPENAI_BATCH_SIZE")
+        batch_size = int(batch_env) if batch_env else None
         if not _is_localhost_url(base_url):
             _warn_cloud_egress("openai")
         return OpenAIEmbeddingProvider(
@@ -448,6 +480,7 @@ def get_provider(
             base_url=base_url,
             model=resolved_model,
             dimension=dimension,
+            batch_size=batch_size,
         )
 
     if provider == "minimax":
